@@ -1,0 +1,380 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ドット生物 - 餌やりゲーム</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            width: 100vw;
+            height: 100vh;
+            overflow: hidden;
+            background: #f0f0f0;
+            font-family: Arial, sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+        }
+
+        #game_canvas {
+            display: block;
+            background: white;
+            border: 2px solid #333;
+            cursor: crosshair;
+        }
+
+        .controls {
+            margin-top: 10px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 14px;
+            color: #333;
+            flex-shrink: 0;
+        }
+
+        .controls button {
+            padding: 4px 12px;
+            cursor: pointer;
+            border: 2px solid #999;
+            background: white;
+            border-radius: 4px;
+            font-size: 13px;
+        }
+
+        .controls button.active {
+            border-color: #333;
+            font-weight: bold;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="game_canvas"></canvas>
+    <div class="controls">
+        <span>クリックで餌やり・色変更:</span>
+        <button id="K" class="active">黒</button>
+        <button id="R">赤</button>
+        <button id="G">緑</button>
+        <button id="B">青</button>
+    </div>
+
+    <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+    <script>
+        $(function() {
+            // ゲーム設定
+            let CANVAS_WIDTH = 800;
+            let CANVAS_HEIGHT = 600;
+            const MAX_CANVAS_WIDTH = 1000;
+            const PARTICLE_SIZE = 8;
+            const FOOD_SIZE = 6;
+            const PARTICLE_SPEED = 2.5;
+            const FOOD_DURATION = 10000;
+            const SPAWN_DELAY = 3000;
+            const MAX_PARTICLES = 100; //最大匹数
+
+            // キャンバス
+            const canvas = $('#game_canvas')[0];
+            const ctx = canvas.getContext('2d');
+
+            // ゲーム状態
+            let particle_list = [];
+            let food_list = [];
+
+            // 現在の餌の色（RGB）とループ管理
+            const color_cycle = [
+                { id: 'K', color: { r: 0,   g: 0,   b: 0   } },
+                { id: 'R', color: { r: 220, g: 0,   b: 0   } },
+                { id: 'G', color: { r: 0,   g: 180, b: 0   } },
+                { id: 'B', color: { r: 0,   g: 0,   b: 220 } },
+            ];
+            let color_index = 0;
+            let current_food_color = { ...color_cycle[0].color };
+
+            function advance_color() {
+                color_index = (color_index + 1) % color_cycle.length;
+                current_food_color = { ...color_cycle[color_index].color };
+                $('.controls button').removeClass('active');
+                $(`#${color_cycle[color_index].id}`).addClass('active');
+            }
+
+            // マウス座標（カーソルプレビュー用）
+            let mouse_x = -100;
+            let mouse_y = -100;
+
+            // RGB → CSS文字列
+            function to_css(c) {
+                return `rgb(${c.r},${c.g},${c.b})`;
+            }
+
+            const COLOR_STEP = 40;
+
+            // 餌の色を吸収：各チャンネル独立で増加、黒は全チャンネル下降
+            function absorb_color(particle_color, food_color) {
+                if (food_color.r === 0 && food_color.g === 0 && food_color.b === 0) {
+                    particle_color.r = Math.max(0, particle_color.r - COLOR_STEP);
+                    particle_color.g = Math.max(0, particle_color.g - COLOR_STEP);
+                    particle_color.b = Math.max(0, particle_color.b - COLOR_STEP);
+                } else {
+                    if (food_color.r > 0) particle_color.r = Math.min(255, particle_color.r + COLOR_STEP);
+                    if (food_color.g > 0) particle_color.g = Math.min(255, particle_color.g + COLOR_STEP);
+                    if (food_color.b > 0) particle_color.b = Math.min(255, particle_color.b + COLOR_STEP);
+                }
+            }
+
+            // ドット（粒子）クラス
+            class Particle {
+                constructor(x, y) {
+                    this.x = x;
+                    this.y = y;
+                    this.vx = (Math.random() - 0.5) * 4;
+                    this.vy = (Math.random() - 0.5) * 4;
+                    this.size = PARTICLE_SIZE;
+                    this.color = { r: 80, g: 80, b: 80 }; // 初期色：グレー
+                    this.energy = 100;
+                    this.max_energy = 100;
+                    this.dying = false;
+                }
+
+                update() {
+                    if (this.dying) {
+                        this.size -= 0.3;
+                        return;
+                    }
+
+                    this.x += this.vx;
+                    this.y += this.vy;
+
+                    // 壁反射
+                    if (this.x - this.size < 0 || this.x + this.size > CANVAS_WIDTH) {
+                        this.vx *= -1;
+                        this.x = Math.max(this.size, Math.min(CANVAS_WIDTH - this.size, this.x));
+                    }
+                    if (this.y - this.size < 0 || this.y + this.size > CANVAS_HEIGHT) {
+                        this.vy *= -1;
+                        this.y = Math.max(this.size, Math.min(CANVAS_HEIGHT - this.size, this.y));
+                    }
+
+                    // 最寄りの食べ物を探す
+                    let nearest_food = null;
+                    let min_distance = 500;
+
+                    for (const food of food_list) {
+                        const distance = Math.hypot(food.x - this.x, food.y - this.y);
+                        if (distance < min_distance) {
+                            min_distance = distance;
+                            nearest_food = food;
+                        }
+                    }
+
+                    // 食べ物に向かって移動・食べる
+                    if (nearest_food) {
+                        const angle = Math.atan2(nearest_food.y - this.y, nearest_food.x - this.x);
+                        this.vx = Math.cos(angle) * PARTICLE_SPEED;
+                        this.vy = Math.sin(angle) * PARTICLE_SPEED;
+
+                        if (min_distance < this.size + FOOD_SIZE) {
+                            this.energy = Math.min(this.max_energy, this.energy + 30);
+                            absorb_color(this.color, nearest_food.color);
+                            food_list.splice(food_list.indexOf(nearest_food), 1);
+                        }
+                    }
+
+                    // 分離：他の粒子と重ならないように反発
+                    const sep_dist = PARTICLE_SIZE * 5;
+                    for (const other of particle_list) {
+                        if (other === this || other.dying) continue;
+                        const dx = this.x - other.x;
+                        const dy = this.y - other.y;
+                        const dist = Math.hypot(dx, dy);
+                        if (dist > 0 && dist < sep_dist) {
+                            const force = (sep_dist - dist) / sep_dist * 0.8;
+                            this.vx += (dx / dist) * force;
+                            this.vy += (dy / dist) * force;
+                        }
+                    }
+
+                    // 速度上限
+                    const speed = Math.hypot(this.vx, this.vy);
+                    if (speed > PARTICLE_SPEED * 2) {
+                        this.vx = (this.vx / speed) * PARTICLE_SPEED * 2;
+                        this.vy = (this.vy / speed) * PARTICLE_SPEED * 2;
+                    }
+
+                    this.energy -= 0.05;
+                    this.size = PARTICLE_SIZE + (this.energy / this.max_energy) * 6;
+                }
+
+                draw() {
+                    ctx.fillStyle = to_css(this.color);
+                    ctx.beginPath();
+                    ctx.arc(this.x, this.y, this.size, 0, Math.PI * 2);
+                    ctx.fill();
+                }
+            }
+
+            // 食べ物クラス
+            class Food {
+                constructor(x, y) {
+                    this.x = x;
+                    this.y = y;
+                    this.size = FOOD_SIZE;
+                    this.created_time = Date.now();
+                    this.color = { ...current_food_color }; // 配置時の色を記録
+                }
+
+                is_expired() {
+                    return Date.now() - this.created_time > FOOD_DURATION;
+                }
+
+                draw() {
+                    ctx.fillStyle = to_css(this.color);
+                    ctx.beginPath();
+                    ctx.arc(this.x, this.y, this.size, 0, Math.PI * 2);
+                    ctx.fill();
+                }
+            }
+
+            // キャンバスリサイズ
+            function resize_canvas() {
+                const controls_h = $('.controls').outerHeight(true) || 40;
+                CANVAS_WIDTH  = Math.min(window.innerWidth - 4, MAX_CANVAS_WIDTH);
+                CANVAS_HEIGHT = window.innerHeight - controls_h - 4;
+                canvas.width  = CANVAS_WIDTH;
+                canvas.height = CANVAS_HEIGHT;
+            }
+
+            // 画面外スポーン座標
+            function get_spawn_position() {
+                const edge = Math.floor(Math.random() * 4);
+                switch (edge) {
+                    case 0: return { x: Math.random() * CANVAS_WIDTH, y: -PARTICLE_SIZE };
+                    case 1: return { x: Math.random() * CANVAS_WIDTH, y: CANVAS_HEIGHT + PARTICLE_SIZE };
+                    case 2: return { x: -PARTICLE_SIZE, y: Math.random() * CANVAS_HEIGHT };
+                    case 3: return { x: CANVAS_WIDTH + PARTICLE_SIZE, y: Math.random() * CANVAS_HEIGHT };
+                }
+            }
+
+            // 初期化
+            function initialize_game() {
+                particle_list = [];
+                food_list = [];
+                const x = CANVAS_WIDTH / 2 + (Math.random() - 0.5) * 100;
+                const y = CANVAS_HEIGHT / 2 + (Math.random() - 0.5) * 100;
+                particle_list.push(new Particle(x, y));
+            }
+
+            // 更新
+            function update_game() {
+                for (let i = particle_list.length - 1; i >= 0; i--) {
+                    const p = particle_list[i];
+                    p.update();
+
+                    if (!p.dying && p.energy <= 0) {
+                        if (particle_list.length > 1) {
+                            p.dying = true;
+                        } else {
+                            p.energy = 0;
+                        }
+                    }
+
+                    if (p.dying && p.size <= 0) {
+                        particle_list.splice(i, 1);
+                    }
+                }
+
+                for (let i = food_list.length - 1; i >= 0; i--) {
+                    if (food_list[i].is_expired()) {
+                        food_list.splice(i, 1);
+                    }
+                }
+            }
+
+            // 描画
+            function draw_game() {
+                ctx.fillStyle = '#ffffff';
+                ctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+                for (const food of food_list) food.draw();
+                for (const p of particle_list) p.draw();
+
+                // カーソル位置に現在の餌色プレビュー（黒枠付き）
+                ctx.beginPath();
+                ctx.arc(mouse_x, mouse_y, FOOD_SIZE + 2, 0, Math.PI * 2);
+                ctx.fillStyle = to_css(current_food_color);
+                ctx.fill();
+                ctx.strokeStyle = '#000000';
+                ctx.lineWidth = 1.5;
+                ctx.stroke();
+            }
+
+            // ゲームループ
+            function game_loop() {
+                update_game();
+                draw_game();
+                requestAnimationFrame(game_loop);
+            }
+
+            // 左クリック：カーソル周囲に複数の餌を置く
+            $(canvas).on('click', function(event) {
+                const rect = canvas.getBoundingClientRect();
+                const x = event.clientX - rect.left;
+                const y = event.clientY - rect.top;
+                const food_count = 3 + Math.floor(Math.random() * 3); // 3〜5個
+                const spread = 60;
+                for (let i = 0; i < food_count; i++) {
+                    const angle = Math.random() * Math.PI * 2;
+                    const r = Math.random() * spread;
+                    food_list.push(new Food(x + Math.cos(angle) * r, y + Math.sin(angle) * r));
+                }
+                setTimeout(function() {
+                    if (particle_list.length < MAX_PARTICLES) {
+                        const pos = get_spawn_position();
+                        particle_list.push(new Particle(pos.x, pos.y));
+                    }
+                }, SPAWN_DELAY + Math.random() * 1000);
+            });
+
+            // 右クリック：色をループ変更
+            $(canvas).on('contextmenu', function(event) {
+                event.preventDefault();
+                advance_color();
+            });
+
+            // マウス移動でカーソル座標を更新
+            $(canvas).on('mousemove', function(event) {
+                const rect = canvas.getBoundingClientRect();
+                mouse_x = event.clientX - rect.left;
+                mouse_y = event.clientY - rect.top;
+            }).on('mouseleave', function() {
+                mouse_x = -100;
+                mouse_y = -100;
+            });
+
+            // ボタンクリックでも色を直接指定可能
+            $('.controls button').on('click', function() {
+                const idx = color_cycle.findIndex(c => c.id === this.id);
+                if (idx !== -1) {
+                    color_index = idx;
+                    current_food_color = { ...color_cycle[idx].color };
+                    $('.controls button').removeClass('active');
+                    $(this).addClass('active');
+                }
+            });
+
+            // リサイズ追従
+            $(window).on('resize', resize_canvas);
+
+            // 開始
+            resize_canvas();
+            initialize_game();
+            game_loop();
+        });
+    </script>
+</body>
+</html>
