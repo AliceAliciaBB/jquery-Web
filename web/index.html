@@ -392,25 +392,39 @@
             // イベントハンドラ
             // =========================================================
 
-            // 左クリック：カーソル中心から半径60px以内にランダムで3〜5個の餌を配置
-            // 同時に SPAWN_DELAY 後に画面外から生物が1匹入ってくる（上限あり）
-            $(canvas).on('click', function(event) {
-                const rect        = canvas.getBoundingClientRect();
-                const x           = event.clientX - rect.left;
-                const y           = event.clientY - rect.top;
-                const food_count  = 3 + Math.floor(Math.random() * 3); // 3〜5個
-                const spread      = 60; // 散布半径（px）
+            // 餌を現在のマウス座標付近に散布する（押しっぱなし中も繰り返し呼ばれる）
+            function place_food() {
+                const food_count = 3 + Math.floor(Math.random() * 3); // 3〜5個
+                const spread     = 60; // 散布半径（px）
                 for (let i = 0; i < food_count; i++) {
                     const angle = Math.random() * Math.PI * 2;
                     const r     = Math.random() * spread;
-                    food_list.push(new Food(x + Math.cos(angle) * r, y + Math.sin(angle) * r));
+                    food_list.push(new Food(mouse_x + Math.cos(angle) * r, mouse_y + Math.sin(angle) * r));
                 }
+            }
+
+            let feed_interval = null; // 押しっぱなし中のインターバルID
+
+            // 左ボタン押し下げ：即座に餌を置き、400ms ごとに繰り返す
+            // スポーン（仲間を呼ぶ）は押しはじめの1回のみ（連打で増えすぎを防ぐ）
+            $(canvas).on('mousedown', function(event) {
+                if (event.button !== 0) return; // 左ボタンのみ対象
+                place_food();
+                feed_interval = setInterval(place_food, 400);
                 setTimeout(function() {
                     if (particle_list.length < MAX_PARTICLES) {
                         const pos = get_spawn_position();
                         particle_list.push(new Particle(pos.x, pos.y));
                     }
                 }, SPAWN_DELAY + Math.random() * 1000);
+            });
+
+            // ボタンを離したらインターバルを止める
+            $(canvas).on('mouseup mouseleave', function(event) {
+                if (feed_interval !== null) {
+                    clearInterval(feed_interval);
+                    feed_interval = null;
+                }
             });
 
             // 右クリック：餌の色を黒→赤→緑→青→黒… とループ切り替え
