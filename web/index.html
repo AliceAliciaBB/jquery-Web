@@ -5,16 +5,18 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>ドット生物 - 餌やりゲーム</title>
     <style>
+        /* 全要素のマージン・パディングをリセット */
         * {
             margin: 0;
             padding: 0;
             box-sizing: border-box;
         }
 
+        /* 画面全体を縦並びFlexにしてキャンバスとコントロールを中央配置 */
         body {
             width: 100vw;
             height: 100vh;
-            overflow: hidden;
+            overflow: hidden;           /* スクロールバーを出さない */
             background: #f0f0f0;
             font-family: Arial, sans-serif;
             display: flex;
@@ -23,13 +25,15 @@
             justify-content: center;
         }
 
+        /* キャンバス本体：JS側でwidth/heightを動的に設定する */
         #game_canvas {
             display: block;
             background: white;
             border: 2px solid #333;
-            cursor: crosshair;
+            cursor: crosshair;          /* 十字カーソルで操作感を演出 */
         }
 
+        /* 下部コントロールバー：餌色ボタンを横並びに表示 */
         .controls {
             margin-top: 10px;
             display: flex;
@@ -37,7 +41,7 @@
             gap: 8px;
             font-size: 14px;
             color: #333;
-            flex-shrink: 0;
+            flex-shrink: 0;             /* リサイズ時にコントロールが縮まないよう固定 */
         }
 
         .controls button {
@@ -49,6 +53,7 @@
             font-size: 13px;
         }
 
+        /* 現在選択中の色ボタンを強調表示 */
         .controls button.active {
             border-color: #333;
             font-weight: bold;
@@ -57,8 +62,9 @@
 </head>
 <body>
     <canvas id="game_canvas"></canvas>
+    <!-- 餌の色選択ボタン：右クリックでもループ切り替え可能 -->
     <div class="controls">
-        <span>クリックで餌やり・色変更:</span>
+        <span>左クリック:餌やり　右クリック:色変更</span>
         <button id="K" class="active">黒</button>
         <button id="R">赤</button>
         <button id="G">緑</button>
@@ -68,35 +74,49 @@
     <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
     <script>
         $(function() {
-            // ゲーム設定
-            let CANVAS_WIDTH = 800;
-            let CANVAS_HEIGHT = 600;
-            const MAX_CANVAS_WIDTH = 1000;
-            const PARTICLE_SIZE = 8;
-            const FOOD_SIZE = 6;
-            const PARTICLE_SPEED = 2.5;
-            const FOOD_DURATION = 10000;
-            const SPAWN_DELAY = 3000;
-            const MAX_PARTICLES = 100; //最大匹数
 
-            // キャンバス
+            // =========================================================
+            // 定数：ゲーム全体の挙動を調整するパラメータ
+            // =========================================================
+            let CANVAS_WIDTH  = 800;            // キャンバス幅（リサイズで更新）
+            let CANVAS_HEIGHT = 600;            // キャンバス高さ（リサイズで更新）
+            const MAX_CANVAS_WIDTH = 1000;      // キャンバスの最大幅（px）
+            const PARTICLE_SIZE   = 8;          // 生物の基本半径（px）
+            const FOOD_SIZE       = 6;          // 餌の半径（px）
+            const PARTICLE_SPEED  = 2.5;        // 餌に向かうときの速度
+            const FOOD_DURATION   = 10000;      // 餌が自然消滅するまでの時間（ms）
+            const SPAWN_DELAY     = 3000;       // 餌やり後に新しい生物が現れるまでの遅延（ms）
+            const MAX_PARTICLES   = 100;        // 画面上に同時に存在できる生物の上限
+            const COLOR_STEP      = 40;         // 餌を食べたときのRGBチャンネル増減量（0〜255）
+            const SEP_RADIUS      = PARTICLE_SIZE * 5;  // 生物同士が反発し始める距離
+            const SEP_FORCE       = 0.8;        // 反発力の強さ（大きいほど強く弾き合う）
+            const MAX_SPEED       = PARTICLE_SPEED * 2; // 速度の上限（反発で加速しすぎを防ぐ）
+
+            // =========================================================
+            // キャンバスとレンダリングコンテキストの取得
+            // =========================================================
             const canvas = $('#game_canvas')[0];
-            const ctx = canvas.getContext('2d');
+            const ctx    = canvas.getContext('2d');
 
+            // =========================================================
             // ゲーム状態
-            let particle_list = [];
-            let food_list = [];
+            // =========================================================
+            let particle_list = [];  // 現在画面上にいる生物の配列
+            let food_list     = [];  // 現在画面上に置かれている餌の配列
 
-            // 現在の餌の色（RGB）とループ管理
+            // =========================================================
+            // 餌の色管理：右クリックで color_cycle を順番に切り替える
+            // =========================================================
             const color_cycle = [
-                { id: 'K', color: { r: 0,   g: 0,   b: 0   } },
-                { id: 'R', color: { r: 220, g: 0,   b: 0   } },
-                { id: 'G', color: { r: 0,   g: 180, b: 0   } },
-                { id: 'B', color: { r: 0,   g: 0,   b: 220 } },
+                { id: 'K', color: { r: 0,   g: 0,   b: 0   } },  // 黒（全チャンネル減少）
+                { id: 'R', color: { r: 220, g: 0,   b: 0   } },  // 赤
+                { id: 'G', color: { r: 0,   g: 180, b: 0   } },  // 緑
+                { id: 'B', color: { r: 0,   g: 0,   b: 220 } },  // 青
             ];
-            let color_index = 0;
-            let current_food_color = { ...color_cycle[0].color };
+            let color_index       = 0;                            // 現在選択中のインデックス
+            let current_food_color = { ...color_cycle[0].color }; // 実際に餌に適用する色
 
+            // 色を次の候補に進め、ボタンのアクティブ表示も更新する
             function advance_color() {
                 color_index = (color_index + 1) % color_cycle.length;
                 current_food_color = { ...color_cycle[color_index].color };
@@ -104,64 +124,77 @@
                 $(`#${color_cycle[color_index].id}`).addClass('active');
             }
 
-            // マウス座標（カーソルプレビュー用）
-            let mouse_x = -100;
+            // =========================================================
+            // マウス座標（キャンバス内でのカーソルプレビュー描画に使用）
+            // =========================================================
+            let mouse_x = -100;  // キャンバス外に初期化して起動直後に描画されないようにする
             let mouse_y = -100;
 
-            // RGB → CSS文字列
+            // =========================================================
+            // ユーティリティ関数
+            // =========================================================
+
+            // {r,g,b} オブジェクトを Canvas の fillStyle に渡せる文字列へ変換
             function to_css(c) {
                 return `rgb(${c.r},${c.g},${c.b})`;
             }
 
-            const COLOR_STEP = 40;
-
-            // 餌の色を吸収：各チャンネル独立で増加、黒は全チャンネル下降
+            // 餌を食べたときに生物の体色を変化させる
+            // 黒餌：R・G・B すべてを COLOR_STEP 下げる（暗くなる）
+            // 有色餌：その色のチャンネルだけ COLOR_STEP 上げる（混色可能）
             function absorb_color(particle_color, food_color) {
                 if (food_color.r === 0 && food_color.g === 0 && food_color.b === 0) {
-                    particle_color.r = Math.max(0, particle_color.r - COLOR_STEP);
-                    particle_color.g = Math.max(0, particle_color.g - COLOR_STEP);
-                    particle_color.b = Math.max(0, particle_color.b - COLOR_STEP);
+                    // 黒餌：全チャンネル減少
+                    particle_color.r = Math.max(0,   particle_color.r - COLOR_STEP);
+                    particle_color.g = Math.max(0,   particle_color.g - COLOR_STEP);
+                    particle_color.b = Math.max(0,   particle_color.b - COLOR_STEP);
                 } else {
+                    // 有色餌：該当チャンネルのみ増加
                     if (food_color.r > 0) particle_color.r = Math.min(255, particle_color.r + COLOR_STEP);
                     if (food_color.g > 0) particle_color.g = Math.min(255, particle_color.g + COLOR_STEP);
                     if (food_color.b > 0) particle_color.b = Math.min(255, particle_color.b + COLOR_STEP);
                 }
             }
 
-            // ドット（粒子）クラス
+            // =========================================================
+            // Particle クラス：画面上を動き回る生物一体を表す
+            // =========================================================
             class Particle {
                 constructor(x, y) {
-                    this.x = x;
-                    this.y = y;
-                    this.vx = (Math.random() - 0.5) * 4;
+                    this.x  = x;
+                    this.y  = y;
+                    this.vx = (Math.random() - 0.5) * 4;  // 初速：ランダム方向
                     this.vy = (Math.random() - 0.5) * 4;
-                    this.size = PARTICLE_SIZE;
+                    this.size  = PARTICLE_SIZE;
                     this.color = { r: 80, g: 80, b: 80 }; // 初期色：グレー
-                    this.energy = 100;
-                    this.max_energy = 100;
-                    this.dying = false;
+                    this.energy     = 100;   // 現在のエネルギー（0になると消滅開始）
+                    this.max_energy = 100;   // エネルギー上限
+                    this.dying = false;      // true のとき縮小消滅アニメーション中
                 }
 
                 update() {
+                    // --- 消滅アニメーション ---
+                    // dying フラグが立っている間はサイズを縮めるだけで移動しない
                     if (this.dying) {
                         this.size -= 0.3;
                         return;
                     }
 
+                    // --- 移動 ---
                     this.x += this.vx;
                     this.y += this.vy;
 
-                    // 壁反射
+                    // --- 壁反射：壁に当たったら速度を反転して内側に押し戻す ---
                     if (this.x - this.size < 0 || this.x + this.size > CANVAS_WIDTH) {
                         this.vx *= -1;
-                        this.x = Math.max(this.size, Math.min(CANVAS_WIDTH - this.size, this.x));
+                        this.x = Math.max(this.size, Math.min(CANVAS_WIDTH  - this.size, this.x));
                     }
                     if (this.y - this.size < 0 || this.y + this.size > CANVAS_HEIGHT) {
                         this.vy *= -1;
                         this.y = Math.max(this.size, Math.min(CANVAS_HEIGHT - this.size, this.y));
                     }
 
-                    // 最寄りの食べ物を探す
+                    // --- 餌の探索：認識範囲500px以内で最も近い餌を探す ---
                     let nearest_food = null;
                     let min_distance = 500;
 
@@ -173,12 +206,14 @@
                         }
                     }
 
-                    // 食べ物に向かって移動・食べる
+                    // --- 餌への接近と摂食 ---
                     if (nearest_food) {
+                        // 餌の方向へ速度ベクトルを向ける
                         const angle = Math.atan2(nearest_food.y - this.y, nearest_food.x - this.x);
                         this.vx = Math.cos(angle) * PARTICLE_SPEED;
                         this.vy = Math.sin(angle) * PARTICLE_SPEED;
 
+                        // 餌に触れたらエネルギー回復・体色変化・餌削除
                         if (min_distance < this.size + FOOD_SIZE) {
                             this.energy = Math.min(this.max_energy, this.energy + 30);
                             absorb_color(this.color, nearest_food.color);
@@ -186,28 +221,31 @@
                         }
                     }
 
-                    // 分離：他の粒子と重ならないように反発
-                    const sep_dist = PARTICLE_SIZE * 5;
+                    // --- 分離行動：近くにいる他の生物から反発力を受ける ---
+                    // フロッキングアルゴリズムの「分離（Separation）」ルールに相当
                     for (const other of particle_list) {
                         if (other === this || other.dying) continue;
-                        const dx = this.x - other.x;
-                        const dy = this.y - other.y;
+                        const dx   = this.x - other.x;
+                        const dy   = this.y - other.y;
                         const dist = Math.hypot(dx, dy);
-                        if (dist > 0 && dist < sep_dist) {
-                            const force = (sep_dist - dist) / sep_dist * 0.8;
+                        if (dist > 0 && dist < SEP_RADIUS) {
+                            // 距離が近いほど強く反発する（線形補間）
+                            const force = (SEP_RADIUS - dist) / SEP_RADIUS * SEP_FORCE;
                             this.vx += (dx / dist) * force;
                             this.vy += (dy / dist) * force;
                         }
                     }
 
-                    // 速度上限
+                    // --- 速度上限：反発力が重なっても暴走しないようクランプ ---
                     const speed = Math.hypot(this.vx, this.vy);
-                    if (speed > PARTICLE_SPEED * 2) {
-                        this.vx = (this.vx / speed) * PARTICLE_SPEED * 2;
-                        this.vy = (this.vy / speed) * PARTICLE_SPEED * 2;
+                    if (speed > MAX_SPEED) {
+                        this.vx = (this.vx / speed) * MAX_SPEED;
+                        this.vy = (this.vy / speed) * MAX_SPEED;
                     }
 
+                    // --- エネルギー消費とサイズ変化 ---
                     this.energy -= 0.05;
+                    // エネルギーが満タンに近いほど大きく表示される
                     this.size = PARTICLE_SIZE + (this.energy / this.max_energy) * 6;
                 }
 
@@ -219,16 +257,21 @@
                 }
             }
 
-            // 食べ物クラス
+            // =========================================================
+            // Food クラス：プレイヤーがキャンバスに置く餌一粒を表す
+            // =========================================================
             class Food {
                 constructor(x, y) {
-                    this.x = x;
-                    this.y = y;
+                    this.x    = x;
+                    this.y    = y;
                     this.size = FOOD_SIZE;
                     this.created_time = Date.now();
-                    this.color = { ...current_food_color }; // 配置時の色を記録
+                    // 配置した瞬間の選択色をスナップショットとして保持する
+                    // （後から色を変えても置き済みの餌の色は変わらない）
+                    this.color = { ...current_food_color };
                 }
 
+                // 置かれてから FOOD_DURATION ms 経過したら期限切れとみなす
                 is_expired() {
                     return Date.now() - this.created_time > FOOD_DURATION;
                 }
@@ -241,7 +284,11 @@
                 }
             }
 
-            // キャンバスリサイズ
+            // =========================================================
+            // resize_canvas：ウィンドウサイズに合わせてキャンバスを更新する
+            // CANVAS_WIDTH / CANVAS_HEIGHT も同時に更新するので
+            // 壁判定・スポーン座標などが自動的に新サイズに追従する
+            // =========================================================
             function resize_canvas() {
                 const controls_h = $('.controls').outerHeight(true) || 40;
                 CANVAS_WIDTH  = Math.min(window.innerWidth - 4, MAX_CANVAS_WIDTH);
@@ -250,45 +297,58 @@
                 canvas.height = CANVAS_HEIGHT;
             }
 
-            // 画面外スポーン座標
+            // =========================================================
+            // get_spawn_position：画面の4辺のいずれかからランダムに
+            // キャンバス外の座標を返す（新しい生物の登場位置として使用）
+            // =========================================================
             function get_spawn_position() {
                 const edge = Math.floor(Math.random() * 4);
                 switch (edge) {
-                    case 0: return { x: Math.random() * CANVAS_WIDTH, y: -PARTICLE_SIZE };
-                    case 1: return { x: Math.random() * CANVAS_WIDTH, y: CANVAS_HEIGHT + PARTICLE_SIZE };
-                    case 2: return { x: -PARTICLE_SIZE, y: Math.random() * CANVAS_HEIGHT };
-                    case 3: return { x: CANVAS_WIDTH + PARTICLE_SIZE, y: Math.random() * CANVAS_HEIGHT };
+                    case 0: return { x: Math.random() * CANVAS_WIDTH,  y: -PARTICLE_SIZE };               // 上辺
+                    case 1: return { x: Math.random() * CANVAS_WIDTH,  y: CANVAS_HEIGHT + PARTICLE_SIZE }; // 下辺
+                    case 2: return { x: -PARTICLE_SIZE,                y: Math.random() * CANVAS_HEIGHT }; // 左辺
+                    case 3: return { x: CANVAS_WIDTH + PARTICLE_SIZE,  y: Math.random() * CANVAS_HEIGHT }; // 右辺
                 }
             }
 
-            // 初期化
+            // =========================================================
+            // initialize_game：ゲームをリセットして生物1匹からスタート
+            // =========================================================
             function initialize_game() {
                 particle_list = [];
-                food_list = [];
-                const x = CANVAS_WIDTH / 2 + (Math.random() - 0.5) * 100;
+                food_list     = [];
+                // 最初の1匹は画面中央付近にランダム配置
+                const x = CANVAS_WIDTH  / 2 + (Math.random() - 0.5) * 100;
                 const y = CANVAS_HEIGHT / 2 + (Math.random() - 0.5) * 100;
                 particle_list.push(new Particle(x, y));
             }
 
-            // 更新
+            // =========================================================
+            // update_game：毎フレーム呼ばれる状態更新処理
+            // =========================================================
             function update_game() {
+                // --- 生物の更新 ---
+                // 逆順ループで splice による配列崩れを防ぐ
                 for (let i = particle_list.length - 1; i >= 0; i--) {
                     const p = particle_list[i];
                     p.update();
 
+                    // エネルギー切れ時の処理
                     if (!p.dying && p.energy <= 0) {
                         if (particle_list.length > 1) {
-                            p.dying = true;
+                            p.dying = true;  // 2匹以上いれば縮小消滅
                         } else {
-                            p.energy = 0;
+                            p.energy = 0;    // 最後の1匹は消えずにその場で停止
                         }
                     }
 
+                    // 縮小アニメーション完了（size<=0）で配列から除去
                     if (p.dying && p.size <= 0) {
                         particle_list.splice(i, 1);
                     }
                 }
 
+                // --- 餌の期限チェック：時間切れの餌を除去 ---
                 for (let i = food_list.length - 1; i >= 0; i--) {
                     if (food_list[i].is_expired()) {
                         food_list.splice(i, 1);
@@ -296,40 +356,53 @@
                 }
             }
 
-            // 描画
+            // =========================================================
+            // draw_game：毎フレーム呼ばれる描画処理
+            // =========================================================
             function draw_game() {
+                // 背景を白でクリア
                 ctx.fillStyle = '#ffffff';
                 ctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
-                for (const food of food_list) food.draw();
-                for (const p of particle_list) p.draw();
 
-                // カーソル位置に現在の餌色プレビュー（黒枠付き）
+                // 餌 → 生物の順で描画（生物が餌の上に重なって見える）
+                for (const food of food_list) food.draw();
+                for (const p    of particle_list) p.draw();
+
+                // マウスカーソル位置に現在選択中の餌色をプレビュー表示
+                // 黒枠を付けることで白背景でも視認しやすくする
                 ctx.beginPath();
                 ctx.arc(mouse_x, mouse_y, FOOD_SIZE + 2, 0, Math.PI * 2);
-                ctx.fillStyle = to_css(current_food_color);
+                ctx.fillStyle   = to_css(current_food_color);
                 ctx.fill();
                 ctx.strokeStyle = '#000000';
-                ctx.lineWidth = 1.5;
+                ctx.lineWidth   = 1.5;
                 ctx.stroke();
             }
 
-            // ゲームループ
+            // =========================================================
+            // ゲームループ：requestAnimationFrame で毎フレーム更新＆描画
+            // =========================================================
             function game_loop() {
                 update_game();
                 draw_game();
                 requestAnimationFrame(game_loop);
             }
 
-            // 左クリック：カーソル周囲に複数の餌を置く
+            // =========================================================
+            // イベントハンドラ
+            // =========================================================
+
+            // 左クリック：カーソル中心から半径60px以内にランダムで3〜5個の餌を配置
+            // 同時に SPAWN_DELAY 後に画面外から生物が1匹入ってくる（上限あり）
             $(canvas).on('click', function(event) {
-                const rect = canvas.getBoundingClientRect();
-                const x = event.clientX - rect.left;
-                const y = event.clientY - rect.top;
-                const food_count = 3 + Math.floor(Math.random() * 3); // 3〜5個
-                const spread = 60;
+                const rect        = canvas.getBoundingClientRect();
+                const x           = event.clientX - rect.left;
+                const y           = event.clientY - rect.top;
+                const food_count  = 3 + Math.floor(Math.random() * 3); // 3〜5個
+                const spread      = 60; // 散布半径（px）
                 for (let i = 0; i < food_count; i++) {
                     const angle = Math.random() * Math.PI * 2;
-                    const r = Math.random() * spread;
+                    const r     = Math.random() * spread;
                     food_list.push(new Food(x + Math.cos(angle) * r, y + Math.sin(angle) * r));
                 }
                 setTimeout(function() {
@@ -340,40 +413,43 @@
                 }, SPAWN_DELAY + Math.random() * 1000);
             });
 
-            // 右クリック：色をループ変更
+            // 右クリック：餌の色を黒→赤→緑→青→黒… とループ切り替え
             $(canvas).on('contextmenu', function(event) {
-                event.preventDefault();
+                event.preventDefault(); // ブラウザのコンテキストメニューを抑制
                 advance_color();
             });
 
-            // マウス移動でカーソル座標を更新
+            // マウス移動：カーソル座標を更新してプレビュー描画に反映
             $(canvas).on('mousemove', function(event) {
                 const rect = canvas.getBoundingClientRect();
                 mouse_x = event.clientX - rect.left;
                 mouse_y = event.clientY - rect.top;
             }).on('mouseleave', function() {
+                // キャンバス外に出たらプレビュー円を非表示（画面外の座標に移動）
                 mouse_x = -100;
                 mouse_y = -100;
             });
 
-            // ボタンクリックでも色を直接指定可能
+            // ボタン直接クリック：色をジャンプ指定（右クリックループの補助）
             $('.controls button').on('click', function() {
                 const idx = color_cycle.findIndex(c => c.id === this.id);
                 if (idx !== -1) {
-                    color_index = idx;
+                    color_index        = idx;
                     current_food_color = { ...color_cycle[idx].color };
                     $('.controls button').removeClass('active');
                     $(this).addClass('active');
                 }
             });
 
-            // リサイズ追従
+            // ウィンドウリサイズ時にキャンバスを追従させる
             $(window).on('resize', resize_canvas);
 
-            // 開始
-            resize_canvas();
-            initialize_game();
-            game_loop();
+            // =========================================================
+            // 起動シーケンス
+            // =========================================================
+            resize_canvas();    // まずキャンバスをウィンドウサイズに合わせる
+            initialize_game();  // 生物1匹を配置
+            game_loop();        // ゲームループ開始
         });
     </script>
 </body>
