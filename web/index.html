@@ -262,10 +262,13 @@
                 }
 
                 draw() {
-                    ctx.fillStyle = to_css(this.color);
                     ctx.beginPath();
                     ctx.arc(this.x, this.y, this.size, 0, Math.PI * 2);
+                    ctx.fillStyle   = to_css(this.color);
                     ctx.fill();
+                    ctx.strokeStyle = '#000000'; // 白くなっても見えるよう黒輪郭を追加
+                    ctx.lineWidth   = 1.5;
+                    ctx.stroke();
                 }
             }
 
